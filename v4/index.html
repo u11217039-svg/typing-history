@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>英打遊戲版本四</title>
+<style>
+  :root { font-family: system-ui, "Noto Sans TC", "Microsoft JhengHei", sans-serif; color: #243e38; background: #f5f3ec; line-height: 1.7; }
+  * { box-sizing: border-box; }
+  body { margin: 0; }
+  main { max-width: 900px; margin: auto; padding: 36px 24px; }
+  h1 { font-size: clamp(28px, 4.5vw, 44px); line-height: 1.3; margin: 12px 0 8px; }
+  h2 { font-size: 22px; margin: 0 0 8px; }
+  a { color: #205d50; }
+  .panel { background: #fff; border: 1px solid #ccd7ce; border-radius: 20px; padding: 24px; margin: 16px 0; }
+  .muted { color: #526459; margin: 0 0 8px; }
+  .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-top: 14px; }
+  label { display: block; font-weight: 600; }
+  input[type=range] { width: 100%; accent-color: #426d5e; }
+  .check { display: flex; gap: 8px; align-items: center; font-weight: 400; margin-top: 12px; }
+  button { font: inherit; padding: 12px 28px; border: 1px solid #426d5e; background: #426d5e; color: #fff; border-radius: 12px; cursor: pointer; }
+  button.secondary { background: #fff; color: #284c40; }
+  button:hover:not(:disabled) { filter: brightness(.95); }
+  button:disabled, input:disabled { opacity: .5; cursor: default; }
+  :focus-visible { outline: 3px solid #b16b35; outline-offset: 4px; }
+  .stats { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+  .stats span { background: #edf1e9; padding: 6px 14px; border-radius: 10px; }
+  .sky { height: 340px; position: relative; overflow: hidden; border-radius: 18px; background: linear-gradient(#e2edf0, #f5f0df); border-bottom: 8px solid #a5b794; outline: none; }
+  .sky.paused::after { content: "已暫停"; position: absolute; inset: 0; display: grid; place-items: center; background: rgba(245,243,236,.75); font-size: 32px; font-weight: 700; }
+  .letter { position: absolute; top: 0; left: 50%; width: 60px; height: 60px; margin-left: -30px; display: grid; place-items: center; border-radius: 16px; background: #ab4939; color: #fff; font-size: 36px; font-weight: 700; box-shadow: 0 6px 0 #d2aa92; transition: opacity .25s; }
+  .letter.hit { opacity: 0; background: #426d5e; }
+  .letter.landed { background: #7a6a60; }
+  .letter.wrong { animation: shake .2s; }
+  @keyframes shake { 25% { margin-left: -36px; } 75% { margin-left: -24px; } }
+  #message { min-height: 2em; margin: 10px 0 0; }
+  #message.error { color: #a1332e; }
+  .result b { font-size: 26px; }
+  [hidden] { display: none !important; }
+  @media (max-width: 700px) { main { padding: 22px 14px; } .panel { padding: 16px; } .sky { height: 300px; } }
+</style>
+</head>
+<body>
+<main>
+  <a href="../index.html">← 回開發歷程首頁</a>
+  <h1>英打遊戲版本四</h1>
+  <p class="muted">練習鍵：A S D F G H J K L ;　每回合 10 題，字母落地前按對就消除。</p>
+
+  <section class="panel">
+    <label for="speed">每個字母落地時間：<span id="speedText">8</span> 秒（秒數越大越慢）</label>
+    <input id="speed" type="range" min="3" max="14" step="1" value="8">
+    <label class="check"><input id="accel" type="checkbox"> 漸進加速：每答對三題縮短一秒，最短三秒</label>
+    <div class="row">
+      <button id="start" type="button">開始</button>
+      <button id="pause" type="button" class="secondary" disabled>暫停</button>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="stats" aria-live="off">
+      <span>題數 <b id="qNum">0</b>/10</span>
+      <span>答對 <b id="okNum">0</b></span>
+      <span>目前落地時間 <b id="curTime">8</b> 秒</span>
+    </div>
+    <div class="sky" id="sky" tabindex="-1"><div class="letter" id="letter" hidden></div></div>
+    <p id="message" role="status">按「開始」，字母會從上方掉下來。</p>
+  </section>
+
+  <section class="panel result" id="result" hidden>
+    <h2>本回合成績</h2>
+    <p>答對：<b id="rOk">0</b> / 10</p>
+    <p>落地未答：<b id="rLand">0</b>　按錯次數：<b id="rWrong">0</b></p>
+    <p>答對平均用時：<b id="rAvg">—</b></p>
+  </section>
+</main>
+<script>
+  const TOTAL = 10, KEYS = ['A','S','D','F','G','H','J','K','L',';'];
+  const $ = id => document.getElementById(id);
+  const speed = $('speed'), accel = $('accel'), startBtn = $('start'), pauseBtn = $('pause');
+  const sky = $('sky'), letter = $('letter'), msg = $('message');
+
+  let phase = 'idle';           // idle | falling | gap | done
+  let paused = false, last = 0;
+  let idx = 0, correct = 0, landed = 0, wrong = 0, times = [];
+  let target = null, fallTime = 8, elapsed = 0, gapLeft = 0;
+
+  function say(t, err) { msg.textContent = t; msg.className = err ? 'error' : ''; }
+  function baseTime() { return +speed.value; }
+  function currentTime() {
+    return accel.checked ? Math.max(3, baseTime() - Math.floor(correct / 3)) : baseTime();
+  }
+  function showStats() {
+    $('qNum').textContent = idx;
+    $('okNum').textContent = correct;
+    $('curTime').textContent = phase === 'idle' || phase === 'done' ? baseTime() : fallTime;
+  }
+  speed.addEventListener('input', () => {
+    $('speedText').textContent = speed.value;
+    if (phase === 'idle' || phase === 'done') showStats();
+  });
+
+  function setLocked(on) { speed.disabled = on; accel.disabled = on; }
+
+  function start() {
+    idx = correct = landed = wrong = 0; times = []; target = null; paused = false;
+    $('result').hidden = true;
+    sky.classList.remove('paused');
+    setLocked(true);
+    startBtn.textContent = '重新開始';
+    pauseBtn.disabled = false; pauseBtn.textContent = '暫停';
+    sky.focus();
+    spawn();
+  }
+
+  function spawn() {
+    const pool = KEYS.filter(k => k !== target);
+    target = pool[Math.floor(Math.random() * pool.length)];
+    idx++; elapsed = 0; fallTime = currentTime(); phase = 'falling';
+    letter.textContent = target;
+    letter.className = 'letter';
+    letter.hidden = false;
+    place(0);
+    showStats();
+    say('請在落地前按下「' + target + '」。');
+  }
+
+  function place(p) {
+    const max = sky.clientHeight - letter.offsetHeight;
+    letter.style.transform = 'translateY(' + (p * max) + 'px)';
+  }
+
+  function afterItem(wait) {
+    phase = 'gap'; gapLeft = wait; showStats();
+  }
+
+  function finish() {
+    phase = 'done';
+    letter.hidden = true;
+    setLocked(false);
+    pauseBtn.disabled = true; pauseBtn.textContent = '暫停';
+    $('rOk').textContent = correct;
+    $('rLand').textContent = landed;
+    $('rWrong').textContent = wrong;
+    $('rAvg').textContent = times.length ? (times.reduce((a, b) => a + b, 0) / times.length).toFixed(1) + ' 秒' : '—';
+    $('result').hidden = false;
+    showStats();
+    say('這回合結束了，答對 ' + correct + ' 題。');
+  }
+
+  function tick(ts) {
+    const dt = Math.min((ts - last) / 1000, 0.1);
+    last = ts;
+    if (!paused) {
+      if (phase === 'falling') {
+        elapsed += dt;
+        if (elapsed >= fallTime) {
+          place(1); landed++;
+          letter.classList.add('landed');
+          say('「' + target + '」落地了。', true);
+          afterItem(0.7);
+        } else place(elapsed / fallTime);
+      } else if (phase === 'gap') {
+        gapLeft -= dt;
+        if (gapLeft <= 0) idx >= TOTAL ? finish() : spawn();
+      }
+    }
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(ts => { last = ts; tick(ts); });
+
+  function setPaused(on) {
+    if (phase !== 'falling' && phase !== 'gap') return;
+    if (paused === on) return;
+    paused = on;
+    sky.classList.toggle('paused', on);
+    pauseBtn.textContent = on ? '繼續' : '暫停';
+    if (on) say('已暫停。按「繼續」回到遊戲。');
+    else say(phase === 'falling' ? '請在落地前按下「' + target + '」。' : '');
+  }
+
+  startBtn.addEventListener('click', start);
+  pauseBtn.addEventListener('click', () => setPaused(!paused));
+  document.addEventListener('visibilitychange', () => { if (document.hidden) setPaused(true); });
+  window.addEventListener('blur', () => setPaused(true));
+
+  document.addEventListener('keydown', e => {
+    if (phase !== 'falling' || paused || e.repeat) return;
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    let ch = null;
+    const m = /^Key([A-Z])$/.exec(e.code);
+    if (m) ch = m[1]; else if (e.code === 'Semicolon') ch = ';';
+    if (!ch) return;
+    if (ch === target) {
+      correct++; times.push(elapsed);
+      letter.classList.add('hit');
+      say('答對了！');
+      afterItem(0.4);
+    } else {
+      wrong++;
+      letter.classList.remove('wrong'); void letter.offsetWidth; letter.classList.add('wrong');
+      say('按錯了，請按「' + target + '」。', true);
+    }
+  });
+
+  showStats();
+</script>
+</body>
+</html>
